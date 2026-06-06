@@ -1,0 +1,186 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no">
+  <title>LocalCue</title>
+  <style>
+    *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+    html, body {
+      width: 100%;
+      height: 100dvh;
+      overflow: hidden;
+      background: #000;
+    }
+
+    #hint {
+      position: fixed;
+      bottom: 16px;
+      right: 16px;
+      color: rgba(255,255,255,0.4);
+      font-size: 13px;
+      pointer-events: none;
+      transition: opacity 1s ease;
+    }
+
+    #wake-indicator {
+      position: fixed;
+      top: 10px;
+      right: 10px;
+      width: 10px;
+      height: 10px;
+      border-radius: 50%;
+      background: #444;   /* grey = unknown / not acquired */
+      pointer-events: none;
+      transition: background 0.4s;
+    }
+    #wake-indicator.active   { background: #48f; }  /* blue  = lock held */
+    #wake-indicator.inactive { background: #f44; }  /* red   = API failed / released */
+
+    #display {
+      position: absolute;
+      top: 0;
+      left: 0;
+      right: 0;
+
+      transform: scaleX(-1); /* mirror by default */
+
+      padding: 20px 15%;
+      font-size: 36px;
+      font-family: Georgia, serif;
+      color: rgba(255,255,255,0.25);
+      line-height: 1.7;
+      white-space: pre-wrap;
+      word-break: break-word;
+    }
+  </style>
+</head>
+<body>
+
+  <div id="display"></div>
+  <div id="hint">tap for fullscreen</div>
+  <div id="wake-indicator" title="Wake lock status"></div>
+
+  <script src="/static/socket.io.min.js"></script>
+  <script>
+    const socket = io();
+    const display = document.getElementById('display');
+
+    let currentFraction = 0;
+    let currentFontSize = 36;
+
+    function applyScroll() {
+      const scrollable = Math.max(0, display.offsetHeight - window.innerHeight);
+      display.style.top = -(currentFraction * scrollable) + 'px';
+    }
+
+    function reportMetrics() {
+      const scrollable = Math.max(0, display.offsetHeight - window.innerHeight);
+      socket.emit('view_metrics', { scrollableHeight: scrollable });
+    }
+
+    socket.on('text_broadcast', ({ text }) => {
+      display.textContent = text;
+      applyScroll();
+      requestAnimationFrame(reportMetrics);
+    });
+
+    socket.on('scroll_update', ({ fraction }) => {
+      currentFraction = fraction;
+      applyScroll();
+    });
+
+    socket.on('settings_broadcast', ({ fontSize, marginPct, flipped, brightness }) => {
+      currentFontSize = fontSize;
+      display.style.fontSize = fontSize + 'px';
+      display.style.padding = `20px ${marginPct}%`;
+      display.style.transform = flipped ? 'scaleX(-1)' : 'none';
+      display.style.color = `rgba(255, 255, 255, ${brightness / 100})`;
+      applyScroll();
+      requestAnimationFrame(reportMetrics);
+    });
+
+    socket.on('seek_to_char', ({ charOffset }) => {
+      const textNode = display.firstChild;
+      if (!textNode || !textNode.nodeValue) return;
+
+      // A collapsed range returns an all-zero DOMRect in Chrome — select one
+      // character instead so getBoundingClientRect() gives a real position.
+      const len = textNode.nodeValue.length;
+      if (len === 0) return;
+      const start = Math.min(charOffset, len - 1);
+      const range = document.createRange();
+      range.setStart(textNode, start);
+      range.setEnd(textNode, start + 1);
+
+      // Character's Y position relative to the top of the display element —
+      // getBoundingClientRect gives viewport coords, but the delta cancels the
+      // current scroll offset, leaving the natural (scroll-independent) Y.
+      const charY = range.getBoundingClientRect().top - display.getBoundingClientRect().top;
+
+      const lineHeight = currentFontSize * 1.7;
+      const targetPx = Math.max(0, charY - 2 * lineHeight); // place clicked line at row 3
+      const scrollable = Math.max(0, display.offsetHeight - window.innerHeight);
+      currentFraction = scrollable > 0 ? Math.min(1, targetPx / scrollable) : 0;
+      applyScroll();
+      socket.emit('seek_ack', { fraction: currentFraction });
+    });
+
+    // Wake lock — keeps screen on during use.
+    // The API releases the lock whenever the page is hidden, so we re-request
+    // on every visibilitychange back to visible and on a 30 s heartbeat.
+    let wakeLock = null;
+    const wakeIndicator = document.getElementById('wake-indicator');
+
+    function setWakeIndicator(state) {  // 'active' | 'inactive' | ''
+      wakeIndicator.className = state;
+    }
+
+    async function requestWakeLock() {
+      if (!('wakeLock' in navigator)) {
+        setWakeIndicator('inactive');
+        return;
+      }
+      try {
+        wakeLock = await navigator.wakeLock.request('screen');
+        setWakeIndicator('active');
+        wakeLock.addEventListener('release', () => {
+          wakeLock = null;
+          setWakeIndicator('inactive');
+        });
+      } catch (err) {
+        console.warn('Wake lock failed:', err.name, err.message);
+        setWakeIndicator('inactive');
+      }
+    }
+
+    document.addEventListener('visibilitychange', () => {
+      if (document.visibilityState === 'visible') requestWakeLock();
+    });
+
+    // Belt-and-suspenders: re-request every 30 s in case the OS released it quietly.
+    setInterval(() => {
+      if (document.visibilityState === 'visible' && !wakeLock) requestWakeLock();
+    }, 30_000);
+
+    // Tap anywhere to toggle fullscreen, and (re-)acquire wake lock on entry.
+    document.addEventListener('click', () => {
+      if (!document.fullscreenElement) {
+        document.documentElement.requestFullscreen().catch(() => {});
+        requestWakeLock();
+      } else {
+        document.exitFullscreen().catch(() => {});
+      }
+    });
+
+    // Fade out the hint after 3 seconds
+    const hint = document.getElementById('hint');
+    setTimeout(() => { hint.style.opacity = '0'; }, 3000);
+    setTimeout(() => { hint.style.display = 'none'; }, 4000);
+
+    // Initial wake lock request on page load
+    requestWakeLock();
+  </script>
+</body>
+</html>

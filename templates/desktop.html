@@ -1,0 +1,457 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>LocalCue</title>
+  <style>
+    *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+    body {
+      display: flex;
+      flex-direction: column;
+      height: 100vh;
+      background: #0d0d1a;
+      color: #eee;
+      font-family: sans-serif;
+    }
+
+    #controls {
+      display: flex;
+      align-items: center;
+      gap: 14px;
+      padding: 0 16px;
+      height: 52px;
+      background: #1a1a2e;
+      flex-shrink: 0;
+      border-bottom: 1px solid #2a2a4a;
+    }
+
+    #controls button {
+      background: #2a2a4e;
+      color: #eee;
+      border: 1px solid #44448a;
+      border-radius: 4px;
+      padding: 4px 10px;
+      cursor: pointer;
+      font-size: 14px;
+      white-space: nowrap;
+    }
+    #controls button:hover { background: #3a3a6e; }
+    #controls button.active { background: #4a4a9e; border-color: #8888ff; }
+
+    .ctrl-sep {
+      width: 1px;
+      height: 28px;
+      background: #2a2a4a;
+      flex-shrink: 0;
+    }
+
+    /* Slider control group: label on top, slider + value on bottom */
+    .slider-group {
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      gap: 1px;
+    }
+    .slider-group label {
+      font-size: 10px;
+      color: #888;
+      white-space: nowrap;
+      line-height: 1;
+    }
+    .slider-row {
+      display: flex;
+      align-items: center;
+      gap: 5px;
+    }
+    .slider-row input[type=range] {
+      width: 80px;
+      accent-color: #6666cc;
+      cursor: pointer;
+    }
+    .slider-val {
+      font-size: 11px;
+      color: #aaa;
+      min-width: 32px;
+      text-align: left;
+    }
+
+    .section-label {
+      font-size: 12px;
+      color: #888;
+      white-space: nowrap;
+    }
+
+    #qr-btn { font-size: 15px; padding: 4px 14px; }
+
+    #scroll-display {
+      margin-left: auto;
+      font-size: 12px;
+      color: #555;
+      white-space: nowrap;
+    }
+
+    #play-status {
+      font-size: 11px;
+      white-space: nowrap;
+      min-width: 52px;
+    }
+    #play-status.playing { color: #6f6; }
+    #play-status.paused  { color: #fa4; }
+
+    #script {
+      flex: 1;
+      resize: none;
+      padding: 20px 24px;
+      font-size: 18px;
+      font-family: Georgia, serif;
+      line-height: 1.7;
+      background: #0d0d1a;
+      color: #e0e0e8;
+      border: none;
+      outline: none;
+      overflow: auto;
+    }
+
+    /* QR overlay */
+    #qr-overlay {
+      position: fixed;
+      inset: 0;
+      background: rgba(0, 0, 0, 0.75);
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      z-index: 100;
+    }
+    #qr-overlay[hidden] { display: none; }
+
+    #qr-popup {
+      background: #fff;
+      color: #111;
+      border-radius: 10px;
+      padding: 28px 32px;
+      text-align: center;
+      max-width: 320px;
+    }
+    #qr-popup p {
+      font-size: 13px;
+      word-break: break-all;
+      margin-bottom: 14px;
+      color: #333;
+    }
+    #qr-popup img { display: block; margin: 0 auto 16px; max-width: 220px; }
+    #qr-popup button {
+      background: #1a1a2e;
+      color: #eee;
+      border: none;
+      border-radius: 4px;
+      padding: 6px 20px;
+      cursor: pointer;
+      font-size: 14px;
+    }
+  </style>
+</head>
+<body>
+
+  <div id="controls">
+    <button id="qr-btn">&#x1F4F1; QR Code</button>
+
+    <div class="ctrl-sep"></div>
+    <span class="section-label">Mobile text controls:</span>
+
+    <!-- Font size slider -->
+    <div class="slider-group">
+      <label>Font size</label>
+      <div class="slider-row">
+        <input type="range" id="font-slider" min="16" max="96" step="4" value="36">
+        <span class="slider-val" id="font-display">36px</span>
+      </div>
+    </div>
+
+    <!-- Side margin slider: icon shows text block between two vertical bars -->
+    <div class="slider-group">
+      <label>| side margins |</label>
+      <div class="slider-row">
+        <input type="range" id="margin-slider" min="0" max="40" step="1" value="15">
+        <span class="slider-val" id="margin-display">15%</span>
+      </div>
+    </div>
+
+    <!-- Flip button -->
+    <button id="flip-btn" class="active" title="Toggle left-right mirror on mobile">&#8596; Flip</button>
+
+    <!-- Brightness slider -->
+    <div class="slider-group">
+      <label>&#9728;&#xFE0E; Brightness</label>
+      <div class="slider-row">
+        <input type="range" id="bright-slider" min="0" max="100" step="1" value="25">
+        <span class="slider-val" id="bright-display">25%</span>
+      </div>
+    </div>
+
+    <div class="ctrl-sep"></div>
+
+    <!-- Play Mode -->
+    <button id="play-mode-btn" title="Toggle play mode — arrow keys control scrolling">&#9654; Play</button>
+
+    <!-- Speed slider (visible in play mode, but always present) -->
+    <div class="slider-group">
+      <label>&#8644; Speed (&#8592;&#8594;)</label>
+      <div class="slider-row">
+        <input type="range" id="speed-slider" min="1" max="100" step="1" value="30">
+        <span class="slider-val" id="speed-display">30</span>
+      </div>
+    </div>
+
+    <span id="play-status"></span>
+
+    <span id="scroll-display">scroll: 0%</span>
+  </div>
+
+  <div id="qr-overlay" hidden>
+    <div id="qr-popup">
+      <p id="qr-url">{{ mobile_url }}</p>
+      <img src="{{ qr_data_uri }}" alt="QR code">
+      <button id="qr-close">Close</button>
+    </div>
+  </div>
+
+  <textarea id="script" spellcheck="false" placeholder="Paste or type your script here…"></textarea>
+
+  <script src="/static/socket.io.min.js"></script>
+  <script>
+    const socket = io();
+
+    let fontSize   = 36;
+    let marginPct  = 15;
+    let flipped    = true;
+    let brightness = 25;
+    let debounceTimer = null;
+
+    const scriptEl      = document.getElementById('script');
+    const fontSlider    = document.getElementById('font-slider');
+    const marginSlider  = document.getElementById('margin-slider');
+    const brightSlider  = document.getElementById('bright-slider');
+    const fontDisplay   = document.getElementById('font-display');
+    const marginDisplay = document.getElementById('margin-display');
+    const brightDisplay = document.getElementById('bright-display');
+    const flipBtn       = document.getElementById('flip-btn');
+    const scrollDisplay = document.getElementById('scroll-display');
+    const overlay       = document.getElementById('qr-overlay');
+    const playModeBtn   = document.getElementById('play-mode-btn');
+    const speedSlider   = document.getElementById('speed-slider');
+    const speedDisplay  = document.getElementById('speed-display');
+    const playStatus    = document.getElementById('play-status');
+
+    // Mouse X position — used to scale mobile scroll speed.
+    let mouseX = window.innerWidth / 2;
+    document.addEventListener('mousemove', (e) => { mouseX = e.clientX; });
+
+    // Virtual mobile scroll fraction, independent of the desktop textarea position.
+    let mobileFraction = 0;
+
+    // Play mode state.
+    let playMode  = false;
+    let playing   = false;
+    let playSpeed = 30;       // slider value = px/s on mobile
+    let mobileScrollableHeight = 0;  // reported by mobile via view_metrics
+    let lastFrameTime = null;
+    let lastEmitTime  = 0;
+
+    socket.on('view_metrics', ({ scrollableHeight }) => {
+      mobileScrollableHeight = scrollableHeight || 0;
+    });
+
+    // Returns fraction/second at current speed, using absolute px/s when mobile metrics available.
+    function speedFracPerSec() {
+      if (mobileScrollableHeight > 0) return playSpeed / mobileScrollableHeight;
+      return playSpeed * 0.00004; // fallback before mobile connects
+    }
+
+    function updateScrollDisplay() {
+      scrollDisplay.textContent = 'scroll: ' + Math.round(mobileFraction * 100) + '%';
+    }
+
+    function syncScroll() {
+      updateScrollDisplay();
+      socket.emit('scroll_sync', { fraction: mobileFraction });
+    }
+
+    function setPlaying(on) {
+      playing = on;
+      playStatus.textContent   = on ? '▶ playing' : '⏸ paused';
+      playStatus.className     = on ? 'playing'   : 'paused';
+    }
+
+    function playLoop(timestamp) {
+      if (!playMode) return;
+
+      if (playing && lastFrameTime !== null) {
+        const dt = Math.min(timestamp - lastFrameTime, 100); // cap to avoid jumps after tab switch
+        const fracPerMs = speedFracPerSec() / 1000;
+        mobileFraction = Math.min(1, mobileFraction + fracPerMs * dt);
+
+        if (timestamp - lastEmitTime >= 33) { // ~30 fps emit rate
+          syncScroll();
+          lastEmitTime = timestamp;
+        }
+
+        if (mobileFraction >= 1) setPlaying(false); // reached end
+      }
+      lastFrameTime = timestamp;
+      requestAnimationFrame(playLoop);
+    }
+
+    playModeBtn.addEventListener('click', () => {
+      playMode = !playMode;
+      playModeBtn.textContent = playMode ? '⏹ Stop' : '▶ Play';
+      playModeBtn.classList.toggle('active', playMode);
+      if (playMode) {
+        setPlaying(false);
+        lastFrameTime = null;
+        requestAnimationFrame(playLoop);
+      } else {
+        setPlaying(false);
+        playStatus.textContent = '';
+        playStatus.className   = '';
+      }
+    });
+
+    speedSlider.addEventListener('input', () => {
+      playSpeed = parseInt(speedSlider.value);
+      speedDisplay.textContent = playSpeed;
+    });
+
+    // Click in textarea → seek mobile to that line (3rd row from top).
+    scriptEl.addEventListener('click', () => {
+      socket.emit('seek_to_char', { charOffset: scriptEl.selectionStart });
+    });
+
+    socket.on('seek_ack', ({ fraction }) => {
+      mobileFraction = fraction;
+      updateScrollDisplay();
+    });
+
+    // Text sync (debounced)
+    scriptEl.addEventListener('input', () => {
+      clearTimeout(debounceTimer);
+      debounceTimer = setTimeout(() => {
+        socket.emit('text_update', { text: scriptEl.value });
+      }, 300);
+    });
+
+    // Scroll sync via wheel events.
+    // Speed is scaled by horizontal mouse position:
+    //   left 25% of screen  → scale 1.0  (normal, desktop and mobile move together)
+    //   right edge          → scale 0.05 (fine control for precise teleprompter position)
+    // The textarea is still allowed to scroll naturally (passive listener, no preventDefault).
+    document.addEventListener('wheel', (e) => {
+      const leftZone = 0.25 * window.innerWidth;
+      let delta;
+
+      if (mouseX > leftZone && mobileScrollableHeight > 0) {
+        // Right 75%: exactly one mobile line per wheel click.
+        const lineFrac = (fontSize * 1.7) / mobileScrollableHeight;
+        delta = Math.sign(e.deltaY) * lineFrac;
+      } else {
+        // Left 25%: proportional scroll tied to the desktop textarea range.
+        let dy = e.deltaY;
+        if (e.deltaMode === 1) dy *= 32;
+        if (e.deltaMode === 2) dy *= window.innerHeight;
+        const max = Math.max(1, scriptEl.scrollHeight - scriptEl.clientHeight);
+        delta = dy / max;
+      }
+
+      mobileFraction = Math.max(0, Math.min(1, mobileFraction + delta));
+      syncScroll();
+    }, { passive: true });
+
+    // Sliders
+    fontSlider.addEventListener('input', () => {
+      fontSize = parseInt(fontSlider.value);
+      fontDisplay.textContent = fontSize + 'px';
+      emitSettings();
+    });
+
+    marginSlider.addEventListener('input', () => {
+      marginPct = parseInt(marginSlider.value);
+      marginDisplay.textContent = marginPct + '%';
+      emitSettings();
+    });
+
+    brightSlider.addEventListener('input', () => {
+      brightness = parseInt(brightSlider.value);
+      brightDisplay.textContent = brightness + '%';
+      emitSettings();
+    });
+
+    // Flip
+    flipBtn.addEventListener('click', () => {
+      flipped = !flipped;
+      flipBtn.classList.toggle('active', flipped);
+      emitSettings();
+    });
+
+    function emitSettings() {
+      socket.emit('settings_update', { fontSize, marginPct, flipped, brightness });
+    }
+
+    // QR popup
+    document.getElementById('qr-btn').addEventListener('click', () => {
+      overlay.removeAttribute('hidden');
+    });
+    document.getElementById('qr-close').addEventListener('click', () => {
+      overlay.setAttribute('hidden', '');
+    });
+    overlay.addEventListener('click', (e) => {
+      if (e.target === overlay) overlay.setAttribute('hidden', '');
+    });
+    document.addEventListener('keydown', (e) => {
+      if (e.key === 'Escape') overlay.setAttribute('hidden', '');
+
+      // Arrow keys only active in play mode, and not when editing the script textarea.
+      if (!playMode || document.activeElement === scriptEl) return;
+
+      switch (e.key) {
+        case 'ArrowLeft':
+          e.preventDefault();
+          playSpeed = Math.max(1, playSpeed - 5);
+          speedSlider.value = playSpeed;
+          speedDisplay.textContent = playSpeed;
+          break;
+
+        case 'ArrowRight':
+          e.preventDefault();
+          playSpeed = Math.min(100, playSpeed + 5);
+          speedSlider.value = playSpeed;
+          speedDisplay.textContent = playSpeed;
+          break;
+
+        case 'ArrowDown':
+          e.preventDefault();
+          if (!playing) {
+            setPlaying(true);
+          } else {
+            // Skip forward ~2 seconds of movement.
+            mobileFraction = Math.min(1, mobileFraction + speedFracPerSec() * 2);
+            syncScroll();
+          }
+          break;
+
+        case 'ArrowUp':
+          e.preventDefault();
+          if (playing) {
+            // First press: pause only, no position change.
+            setPlaying(false);
+          } else {
+            // Already paused: skip back ~6 seconds of movement.
+            mobileFraction = Math.max(0, mobileFraction - speedFracPerSec() * 6);
+            syncScroll();
+          }
+          break;
+      }
+    });
+  </script>
+</body>
+</html>
