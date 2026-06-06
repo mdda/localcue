@@ -4,6 +4,10 @@
 Runs entirely on your local network — no account, no cloud, no cost. 
 Type your script on the desktop, read it from your phone over Wi-Fi. Supports teleprompter mirrors (horizontal flip), real-time sync, auto-scroll, and one-click seek. Up and running in minutes.
 
+![Desktop browser interface](static/screenshot_browser_1920x1045.png)
+
+![Mobile teleprompter — mirrored display synced with the desktop](static/mobile-on-teleprompter_1417x1024.jpg)
+
 ## Requirements
 
 - Python 3.8+
