@@ -1,6 +1,8 @@
 # LocalCue
 
-**Free, open-source teleprompter with mirror support.** Runs entirely on your local network — no account, no cloud, no cost. Type your script on the desktop, read it from your phone over Wi-Fi. Supports teleprompter mirrors (horizontal flip), real-time sync, auto-scroll, and one-click seek. Up and running in minutes.
+**Free, open-source teleprompter with mirror support.** 
+Runs entirely on your local network — no account, no cloud, no cost. 
+Type your script on the desktop, read it from your phone over Wi-Fi. Supports teleprompter mirrors (horizontal flip), real-time sync, auto-scroll, and one-click seek. Up and running in minutes.
 
 ## Requirements
 
@@ -12,7 +14,8 @@ All Python dependencies are declared inline in `app.py` and installed automatica
 ## Quick Start
 
 ```bash
-cd teleprompt-local
+git clone git@github.com:mdda/localcue.git
+cd localcue
 uv run app.py
 ```
 
