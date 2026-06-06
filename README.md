@@ -32,7 +32,7 @@ Mobile:  http://192.168.x.x:5858/view
 
 Open the Desktop URL in your browser. Scan the QR code (click the **QR Code** button) with your phone to open the mobile view.
 
-> **Firewall note:** If your phone cannot reach the server, allow port 5858:
+> **Firewall note:** If your phone cannot reach the desktop machine running `uv run app.py`, open port 5858 in its firewall:
 > - **Fedora/RHEL:** `sudo firewall-cmd --add-port=5858/tcp --zone=public`
 > - **Ubuntu/Debian:** `sudo ufw allow 5858`
 > - **macOS:** System Settings → Network → Firewall → Options → allow incoming connections for Python (or disable the firewall for trusted home networks)
