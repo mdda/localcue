@@ -19,9 +19,10 @@
     #controls {
       display: flex;
       align-items: center;
-      gap: 14px;
-      padding: 0 16px;
-      height: 52px;
+      flex-wrap: wrap;           /* a second row on narrower windows, rather than clipping */
+      gap: 6px 14px;
+      padding: 6px 16px;
+      min-height: 52px;
       background: #1a1a2e;
       flex-shrink: 0;
       border-bottom: 1px solid #2a2a4a;
@@ -101,8 +102,9 @@
     #scroll-display {
       margin-left: auto;
       font-size: 12px;
-      color: #555;
+      color: #777;
       white-space: nowrap;
+      flex-shrink: 0;
     }
 
     #play-status {
@@ -112,6 +114,46 @@
     }
     #play-status.playing { color: #6f6; }
     #play-status.paused  { color: #fa4; }
+
+    /* What voice-follow is hearing (newest words at the right) */
+    #voice-status {
+      font-size: 11px;
+      color: #8a8;
+      white-space: nowrap;
+      overflow: hidden;
+      direction: rtl;            /* clip the oldest words (left), keep the newest visible */
+      text-overflow: ellipsis;
+      width: 180px;
+      flex-shrink: 0;
+    }
+    #voice-status.error { color: #f66; direction: ltr; }
+
+    #editor {
+      flex: 1;
+      min-height: 0;
+      position: relative;
+      display: flex;
+    }
+
+    /* Reading line: positioned by JS, one third of the way down the editor */
+    #reading-line {
+      position: absolute;
+      left: 0;
+      right: 0;
+      height: 1px;
+      background: rgba(255, 70, 70, 0.6);
+      pointer-events: none;
+    }
+
+    /* Hidden copy of the editor text, used to measure where characters wrap */
+    #mirror {
+      position: absolute;
+      top: 0;
+      left: -10000px;
+      visibility: hidden;
+      white-space: pre-wrap;
+      overflow-wrap: break-word;
+    }
 
     #script {
       flex: 1;
@@ -223,7 +265,13 @@
 
     <span id="play-status"></span>
 
-    <span id="scroll-display">scroll: 0%</span>
+    <div class="ctrl-sep"></div>
+
+    <!-- Voice-follow: local speech recognition on the server moves the position -->
+    <button id="voice-btn" title="Voice-follow: listen to the microphone and keep up with what you read">&#x1F3A4; Voice</button>
+    <span id="voice-status"></span>
+
+    <span id="scroll-display">position: 0%</span>
   </div>
 
   <div id="qr-overlay" hidden>
@@ -234,9 +282,14 @@
     </div>
   </div>
 
-  <textarea id="script" spellcheck="false" placeholder="Paste or type your script here…"></textarea>
+  <div id="editor">
+    <textarea id="script" spellcheck="false" placeholder="Paste or type your script here…"></textarea>
+    <div id="reading-line"></div>
+  </div>
+  <div id="mirror" aria-hidden="true"></div>
 
   <script src="/static/socket.io.min.js"></script>
+  <script src="/static/textpos.js"></script>
   <script>
     const socket = io();
 
@@ -247,6 +300,8 @@
     let debounceTimer = null;
 
     const scriptEl      = document.getElementById('script');
+    const mirror        = document.getElementById('mirror');
+    const readingLineEl = document.getElementById('reading-line');
     const fontSlider    = document.getElementById('font-slider');
     const marginSlider  = document.getElementById('margin-slider');
     const brightSlider  = document.getElementById('bright-slider');
@@ -261,105 +316,186 @@
     const speedDisplay  = document.getElementById('speed-display');
     const playStatus    = document.getElementById('play-status');
 
-    // Mouse X position — used to scale mobile scroll speed.
-    let mouseX = window.innerWidth / 2;
-    document.addEventListener('mousemove', (e) => { mouseX = e.clientX; });
+    // ---- Shared position & reading line ----
+    // pos is a (fractional) character offset: the text on the reading line, on every
+    // device. Each device maps it to pixels with its own line wrapping (textpos.js).
+    // A textarea can't measure character positions, so we measure a hidden mirror
+    // div that has the same text, font and wrap width.
+    const deskLineHeight = () => parseFloat(getComputedStyle(scriptEl).lineHeight);
+    const mapper = createTextMapper(mirror, deskLineHeight);
+    let pos = 0;
 
-    // Virtual mobile scroll fraction, independent of the desktop textarea position.
-    let mobileFraction = 0;
+    const readingY = () => scriptEl.clientHeight * READING_LINE;
+    const padTop   = () => parseFloat(scriptEl.style.paddingTop) || 0;
 
-    // Play mode state.
-    let playMode  = false;
-    let playing   = false;
-    let playSpeed = 30;       // slider value = px/s on mobile
-    let mobileScrollableHeight = 0;  // reported by mobile via view_metrics
-    let lastFrameTime = null;
-    let lastEmitTime  = 0;
+    function layoutEditor() {
+      const cs = getComputedStyle(scriptEl);
+      const lh = deskLineHeight();
+      // Padding lets the first line reach the reading line (top) and the last line too (bottom).
+      scriptEl.style.paddingTop    = (readingY() - lh / 2) + 'px';
+      scriptEl.style.paddingBottom = (scriptEl.clientHeight - readingY()) + 'px';
+      mirror.style.width = (scriptEl.clientWidth - parseFloat(cs.paddingLeft) - parseFloat(cs.paddingRight)) + 'px';
+      for (const prop of ['fontFamily', 'fontSize', 'fontWeight', 'lineHeight', 'letterSpacing', 'wordSpacing', 'tabSize']) {
+        mirror.style[prop] = cs[prop];
+      }
+      // Rule just under the current line, like ruled paper (doesn't strike through text).
+      readingLineEl.style.top = (readingY() + lh / 2) + 'px';
+    }
 
-    socket.on('view_metrics', ({ scrollableHeight }) => {
-      mobileScrollableHeight = scrollableHeight || 0;
-    });
-
-    // Returns fraction/second at current speed, using absolute px/s when mobile metrics available.
-    function speedFracPerSec() {
-      if (mobileScrollableHeight > 0) return playSpeed / mobileScrollableHeight;
-      return playSpeed * 0.00004; // fallback before mobile connects
+    function setMirrorText() {
+      mirror.textContent = scriptEl.value;
     }
 
     function updateScrollDisplay() {
-      scrollDisplay.textContent = 'scroll: ' + Math.round(mobileFraction * 100) + '%';
+      const n = scriptEl.value.length;
+      scrollDisplay.textContent = 'position: ' + (n ? Math.round(pos / n * 100) : 0) + '%';
     }
 
-    function syncScroll() {
+    function setPos(p, emit) {
+      pos = p;
       updateScrollDisplay();
-      socket.emit('scroll_sync', { fraction: mobileFraction });
+      if (emit) socket.emit('position', { pos });
+    }
+
+    // Position currently on the editor's reading line.
+    function posFromEditor() {
+      return mapper.yToPos(scriptEl.scrollTop + readingY() - padTop());
+    }
+
+    // Scroll the editor so pos is on its reading line. Remembers the resulting
+    // scrollTop so the scroll event this causes isn't mistaken for a user scroll.
+    let expectedScrollTop = null;
+    function scrollEditorTo(p) {
+      scriptEl.scrollTop = padTop() + mapper.posToY(p) - readingY();
+      expectedScrollTop = scriptEl.scrollTop;
+    }
+
+    // Any user scroll of the editor (wheel, scrollbar, keyboard, caret) moves the phone.
+    scriptEl.addEventListener('scroll', () => {
+      if (expectedScrollTop !== null && Math.abs(scriptEl.scrollTop - expectedScrollTop) < 2) return;
+      expectedScrollTop = null;
+      setPos(posFromEditor(), true);
+    });
+
+    window.addEventListener('resize', () => {
+      layoutEditor();
+      scrollEditorTo(pos);
+    });
+
+    // Positions from elsewhere: the phone while playing (~10 Hz), voice-follow, or the
+    // server's connect-time push (initial) — adopted only on first load (see State restore).
+    socket.on('position', ({ pos: p, initial }) => {
+      if (initial && restored) return;
+      setPos(p, false);
+      scrollEditorTo(p);
+      if (initial) restored = true;
+    });
+
+    // Wheel: scrolls the editor (and so the phone) from anywhere on the page.
+    // Speed scales with horizontal mouse position, for fine positioning:
+    //   left 25% of window → 1.0 (normal),  right edge → 0.2 (5× finer)
+    let mouseX = window.innerWidth / 2;
+    document.addEventListener('mousemove', (e) => { mouseX = e.clientX; });
+    let wheelRemainder = 0;
+    document.addEventListener('wheel', (e) => {
+      if (e.ctrlKey || !overlay.hidden) return;  // pinch-zoom / QR popup
+      e.preventDefault();
+      let dy = e.deltaY;
+      if (e.deltaMode === 1) dy *= 32;
+      if (e.deltaMode === 2) dy *= window.innerHeight;
+      const leftZone = 0.25 * window.innerWidth;
+      const scale = mouseX <= leftZone ? 1 : 1 - 0.8 * (mouseX - leftZone) / (window.innerWidth - leftZone);
+      wheelRemainder += dy * scale;
+      const step = Math.trunc(wheelRemainder);  // keep sub-pixel amounts for touchpads
+      wheelRemainder -= step;
+      scriptEl.scrollTop += step;
+    }, { passive: false });
+
+    // Click on a line (without dragging a selection) → put that line on the reading line.
+    scriptEl.addEventListener('click', () => {
+      if (scriptEl.selectionStart !== scriptEl.selectionEnd) return;
+      const p = mapper.lineStart(scriptEl.selectionStart);
+      setPos(p, true);
+      scrollEditorTo(p);
+    });
+
+    // ---- Play mode ----
+    // The phone runs the auto-scroll itself; we send it commands and follow its
+    // position reports. Speed is px/s on the phone.
+    let playMode  = false;
+    let playing   = false;
+    let playSpeed = 30;
+
+    function sendPlay(action, extra = {}) {
+      socket.emit('play_control', { action, speed: playSpeed, ...extra });
     }
 
     function setPlaying(on) {
       playing = on;
-      playStatus.textContent   = on ? '▶ playing' : '⏸ paused';
-      playStatus.className     = on ? 'playing'   : 'paused';
+      playStatus.textContent = on ? '▶ playing' : '⏸ paused';
+      playStatus.className   = on ? 'playing'   : 'paused';
     }
 
-    function playLoop(timestamp) {
-      if (!playMode) return;
-
-      if (playing && lastFrameTime !== null) {
-        const dt = Math.min(timestamp - lastFrameTime, 100); // cap to avoid jumps after tab switch
-        const fracPerMs = speedFracPerSec() / 1000;
-        mobileFraction = Math.min(1, mobileFraction + fracPerMs * dt);
-
-        if (timestamp - lastEmitTime >= 33) { // ~30 fps emit rate
-          syncScroll();
-          lastEmitTime = timestamp;
-        }
-
-        if (mobileFraction >= 1) setPlaying(false); // reached end
-      }
-      lastFrameTime = timestamp;
-      requestAnimationFrame(playLoop);
+    function setSpeed(v) {
+      playSpeed = Math.max(1, Math.min(100, v));
+      speedSlider.value = playSpeed;
+      speedDisplay.textContent = playSpeed;
     }
 
     playModeBtn.addEventListener('click', () => {
       playMode = !playMode;
       playModeBtn.textContent = playMode ? '⏹ Stop' : '▶ Play';
       playModeBtn.classList.toggle('active', playMode);
-      // Read-only in play mode so arrow keys drive the prompter rather than the
-      // caret; clicking a line still seeks (selectionStart works when read-only).
+      // Read-only in play mode so arrow keys drive the prompter rather than the caret.
       scriptEl.readOnly = playMode;
       playModeBtn.blur();
-      if (playMode) {
-        setPlaying(false);
-        lastFrameTime = null;
-        requestAnimationFrame(playLoop);
-      } else {
-        setPlaying(false);
+      sendPlay('pause');
+      setPlaying(false);
+      if (!playMode) {
         playStatus.textContent = '';
         playStatus.className   = '';
       }
     });
 
     speedSlider.addEventListener('input', () => {
-      playSpeed = parseInt(speedSlider.value);
-      speedDisplay.textContent = playSpeed;
+      setSpeed(parseInt(speedSlider.value));
+      sendPlay('speed');
     });
 
-    // Click in textarea → seek mobile to that line (3rd row from top).
-    scriptEl.addEventListener('click', () => {
-      socket.emit('seek_to_char', { charOffset: scriptEl.selectionStart });
+    socket.on('play_control', (d) => setSpeed(d.speed));  // speed as stored on the server
+    socket.on('play_state', ({ playing: on }) => { if (playMode) setPlaying(on); });
+
+    // ---- Voice-follow ----
+    // Speech recognition runs in the server (voice.py); matches arrive as ordinary
+    // position events. Here we just toggle it and show what it hears.
+    const voiceBtn    = document.getElementById('voice-btn');
+    const voiceStatus = document.getElementById('voice-status');
+    let voiceOn = false;
+
+    voiceBtn.addEventListener('click', () => {
+      voiceBtn.blur();
+      socket.emit('voice_toggle', { on: !voiceOn });
     });
 
-    socket.on('seek_ack', ({ fraction }) => {
-      mobileFraction = fraction;
-      updateScrollDisplay();
+    socket.on('voice_status', ({ state, heard, error }) => {
+      voiceOn = state === 'loading' || state === 'listening';
+      voiceBtn.classList.toggle('active', voiceOn);
+      voiceStatus.className = state === 'error' ? 'error' : '';
+      voiceStatus.textContent =
+        state === 'error'     ? 'voice: ' + error :
+        state === 'listening' ? (heard || 'listening…') :
+        state === 'loading'   ? heard : '';
+      voiceStatus.title = voiceStatus.textContent;
     });
 
-    // Text sync (debounced)
+    // Text sync (debounced). The editor is the reference for position while editing.
     scriptEl.addEventListener('input', () => {
+      setMirrorText();
       updateFileStatus();
       clearTimeout(debounceTimer);
       debounceTimer = setTimeout(() => {
         socket.emit('text_update', { text: scriptEl.value });
+        setPos(posFromEditor(), true);
       }, 300);
     });
 
@@ -432,32 +568,6 @@
       }
     });
 
-    // Scroll sync via wheel events.
-    // Speed is scaled by horizontal mouse position:
-    //   left 25% of screen  → scale 1.0  (normal, desktop and mobile move together)
-    //   right edge          → scale 0.05 (fine control for precise teleprompter position)
-    // The textarea is still allowed to scroll naturally (passive listener, no preventDefault).
-    document.addEventListener('wheel', (e) => {
-      const leftZone = 0.25 * window.innerWidth;
-      let delta;
-
-      if (mouseX > leftZone && mobileScrollableHeight > 0) {
-        // Right 75%: exactly one mobile line per wheel click.
-        const lineFrac = (fontSize * 1.7) / mobileScrollableHeight;
-        delta = Math.sign(e.deltaY) * lineFrac;
-      } else {
-        // Left 25%: proportional scroll tied to the desktop textarea range.
-        let dy = e.deltaY;
-        if (e.deltaMode === 1) dy *= 32;
-        if (e.deltaMode === 2) dy *= window.innerHeight;
-        const max = Math.max(1, scriptEl.scrollHeight - scriptEl.clientHeight);
-        delta = dy / max;
-      }
-
-      mobileFraction = Math.max(0, Math.min(1, mobileFraction + delta));
-      syncScroll();
-    }, { passive: true });
-
     // Sliders
     fontSlider.addEventListener('input', () => {
       fontSize = parseInt(fontSlider.value);
@@ -488,21 +598,24 @@
       socket.emit('settings_update', { fontSize, marginPct, flipped, brightness });
     }
 
-    // State restore. The server pushes full state on every connect:
+    // State restore. The server pushes full state on every connect, ending with an
+    // `initial` position:
     //   first connect of this page (e.g. after a reload) → adopt the server's state;
-    //   later reconnects (e.g. server restarted, so its state is blank) → push ours back.
+    //   reconnects (e.g. server restarted, so its state is blank) → ignore it, push ours back.
+    // (Don't use the socket's 'connect' event for this: the server's pushes can arrive
+    // before it fires. The manager's 'reconnect' event only fires on real reconnects.)
     let restored = false;
 
-    socket.on('connect', () => {
-      if (!restored) return;
+    socket.io.on('reconnect', () => {
       socket.emit('text_update', { text: scriptEl.value });
       emitSettings();
-      syncScroll();
+      setPos(pos, true);
     });
 
     socket.on('text_broadcast', ({ text }) => {
       if (restored) return;
       scriptEl.value = text;
+      setMirrorText();
       updateFileStatus();
     });
 
@@ -512,14 +625,6 @@
       marginPct  = s.marginPct;  marginSlider.value = marginPct;  marginDisplay.textContent = marginPct + '%';
       brightness = s.brightness; brightSlider.value = brightness; brightDisplay.textContent = brightness + '%';
       flipped    = s.flipped;    flipBtn.classList.toggle('active', flipped);
-    });
-
-    // scroll_update is the last of the connect-time pushes, so it marks the restore as done.
-    socket.on('scroll_update', ({ fraction }) => {
-      if (restored) return;
-      mobileFraction = fraction;
-      updateScrollDisplay();
-      restored = true;
     });
 
     // QR popup
@@ -549,42 +654,40 @@
       switch (e.key) {
         case 'ArrowLeft':
           e.preventDefault();
-          playSpeed = Math.max(1, playSpeed - 5);
-          speedSlider.value = playSpeed;
-          speedDisplay.textContent = playSpeed;
+          setSpeed(playSpeed - 5);
+          sendPlay('speed');
           break;
 
         case 'ArrowRight':
           e.preventDefault();
-          playSpeed = Math.min(100, playSpeed + 5);
-          speedSlider.value = playSpeed;
-          speedDisplay.textContent = playSpeed;
+          setSpeed(playSpeed + 5);
+          sendPlay('speed');
           break;
 
         case 'ArrowDown':
           e.preventDefault();
           if (!playing) {
             setPlaying(true);
+            sendPlay('play');
           } else {
-            // Skip forward ~2 seconds of movement.
-            mobileFraction = Math.min(1, mobileFraction + speedFracPerSec() * 2);
-            syncScroll();
+            sendPlay('skip', { seconds: 2 });   // skip forward ~2 s of movement
           }
           break;
 
         case 'ArrowUp':
           e.preventDefault();
           if (playing) {
-            // First press: pause only, no position change.
-            setPlaying(false);
+            setPlaying(false);                  // first press: pause only
+            sendPlay('pause');
           } else {
-            // Already paused: skip back ~6 seconds of movement.
-            mobileFraction = Math.max(0, mobileFraction - speedFracPerSec() * 6);
-            syncScroll();
+            sendPlay('skip', { seconds: -6 });  // already paused: back ~6 s
           }
           break;
       }
     });
+
+    layoutEditor();
+    updateScrollDisplay();
   </script>
 </body>
 </html>

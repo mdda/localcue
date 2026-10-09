@@ -73,24 +73,27 @@ The mobile view (`/view`) is designed to run fullscreen so the browser address b
 | **☀ Brightness** slider | Dims the white text on mobile (0–100%) — useful if bright text reflects in glasses |
 | **▶ Play / ⏹ Stop** | Toggles Play Mode — see below |
 | **⇄ Speed** slider | Auto-scroll speed in px/s on the mobile display (1–100, default 30) |
-| **scroll: N%** | Shows your current position through the script |
+| **🎤 Voice** | Voice-follow on/off — the script keeps up with what you say (see below). The words it hears are shown beside it |
+| **position: N%** | Shows your current position through the script (by characters) |
 
 ## Scroll Control
 
+### Reading line
+
+Both the desktop editor and the phone show a thin red **reading line** one third of the way down the screen, so you can see some lead-in above it and what's coming below. The line just under the rule is the *same text* on both devices — the position is tracked as a character offset in the script, and each device maps that to its own line wrapping (the wide desktop editor and the narrow phone wrap lines differently).
+
 ### Mouse wheel
 
-Scroll the mouse wheel anywhere on the desktop page to advance the mobile teleprompter view. The behaviour differs by horizontal mouse position:
+Scroll the mouse wheel anywhere on the desktop page: the editor scrolls, and the phone follows so the same text stays on both reading lines. (Scrolling the editor any other way — scrollbar, keyboard — does the same.) The speed depends on horizontal mouse position:
 
 | Mouse position | Behaviour |
 |---|---|
-| Left 25% of screen | Proportional scroll — desktop textarea and mobile track together |
-| Right 75% of screen | **Exactly one line per wheel click** on the mobile display |
-
-The right-side one-line-per-click mode uses the mobile's actual rendered line height (reported back automatically), so it stays accurate regardless of font size or script length.
+| Left 25% of screen | Normal scroll speed |
+| Right 75% of screen | Progressively finer, down to 1/5 speed at the right edge — for precise positioning |
 
 ### Click to seek
 
-**Click anywhere in the desktop textarea** to jump the mobile view to that point in the script. The clicked line is positioned as the 3rd line from the top of the mobile display, making it easy to resume after editing.
+**Click a line in the desktop editor** to put it on the reading line on both the desktop and the phone — handy for resuming after editing.
 
 ## Play Mode
 
@@ -104,11 +107,29 @@ Click **▶ Play** to enter Play Mode. Arrow keys then control auto-scroll inste
 | `↑` (while paused) | Skip back ~6 seconds of movement |
 | `←` / `→` | Decrease / increase speed by 5 |
 
-The speed slider (1–100) represents pixels per second on the mobile display, so the same value feels consistent regardless of script length. At the default of 30 px/s with a 36 px font, the scroll rate is roughly 0.5 lines per second — comfortable reading pace.
+The auto-scroll runs on the phone itself (smooth, unaffected by WiFi hiccups), and the desktop editor follows along. The speed slider (1–100) represents pixels per second on the mobile display, so the same value feels consistent regardless of script length. At the default of 30 px/s with a 36 px font, the scroll rate is roughly 0.5 lines per second — comfortable reading pace.
 
 A status indicator next to the slider shows **▶ playing** (green) or **⏸ paused** (amber) while in Play Mode.
 
 Click **⏹ Stop** to exit Play Mode and restore normal arrow-key behaviour in the textarea.
+
+## Voice-Follow
+
+Click **🎤 Voice** and just start reading — no need to pick a scroll speed. The server listens to the microphone, recognises your speech **locally** (nothing leaves your machine), and moves the script so the line you're reading sits on the reading line. The phone glides to each new position rather than jumping.
+
+It is deliberately loose, to suit reading from a script while riffing a little:
+
+- **Fluffs:** if you repeat the previous line(s), it follows you back, then on again.
+- **Riffing / bullet points:** off-script speech doesn't match, so the script simply waits for you to come back to it.
+- **Skipping ahead:** it searches a few hundred characters ahead of the current position (matches further ahead need to be more convincing).
+- **Manual control still works:** scroll or click to reposition at any time — voice-follow forgets what it heard and carries on from the new position. A typical start: scroll to the right place, click 🎤 Voice, start reading.
+
+Details:
+
+- Speech recognition is [Vosk](https://alphacephei.com/vosk/) with its small English model (~40 MB), downloaded to `~/.cache/vosk` the first time you click 🎤 Voice. After that, the first click in each server run takes a few seconds to load it; toggling off and on again is instant.
+- Audio is captured through PulseAudio's API — on modern Linux that is PipeWire's `pipewire-pulse`. It uses your default input; to pick another, pass `--mic SOURCE` (list sources with `pactl list short sources`).
+- To use a different (e.g. larger, more accurate) Vosk model: `--vosk-model NAME` (downloaded automatically) or `--vosk-model /path/to/model-dir`.
+- The matching ideas (phonetic word codes so homophones match, word-level fuzzy matching, a penalty on distance ahead) are adapted from [promptme-ai](https://github.com/larsbaunwall/promptme-ai).
 
 ## Screen Wake Lock (Mobile)
 
@@ -134,6 +155,6 @@ The mobile view requests a [Screen Wake Lock](https://developer.mozilla.org/en-U
 2. **Set up mobile:** scan the QR code, open the link, add to home screen, launch fullscreen.
 3. **Adjust:** use the sliders to set font size, margins, and brightness to suit your lighting and mirror.
 4. **Flip:** confirm the **↔ Flip** button is highlighted (mirrored) if you are using a physical teleprompter mirror; un-flip for direct reading without a mirror.
-5. **Position:** click a line in the desktop textarea to jump the mobile view to that point.
-6. **Record:** use Play Mode (▶) with arrow keys for hands-free auto-scroll, or scroll manually with the mouse wheel.
+5. **Position:** click a line in the desktop editor to put it on the reading line on both screens.
+6. **Record:** click **🎤 Voice** and just read (the script follows you), or use Play Mode (▶) with arrow keys for fixed-speed auto-scroll, or scroll manually with the mouse wheel.
 7. **Recover:** if you lose your place, press **↑** to pause, then click the correct line in the desktop textarea to seek back to it.

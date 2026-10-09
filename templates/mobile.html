@@ -54,47 +54,140 @@
       white-space: pre-wrap;
       word-break: break-word;
     }
+
+    /* Reading line: positioned by JS, one third of the way down */
+    #reading-line {
+      position: fixed;
+      left: 0;
+      right: 0;
+      height: 2px;
+      background: rgba(255, 70, 70, 0.45);
+      pointer-events: none;
+    }
   </style>
 </head>
 <body>
 
   <div id="display"></div>
+  <div id="reading-line"></div>
   <div id="hint">tap for fullscreen</div>
   <div id="wake-indicator" title="Wake lock status"></div>
 
   <script src="/static/socket.io.min.js"></script>
+  <script src="/static/textpos.js"></script>
   <script>
     const socket = io();
     const display = document.getElementById('display');
+    const readingLine = document.getElementById('reading-line');
 
-    let currentFraction = 0;
     let currentFontSize = 36;
+    const lineHeight = () => currentFontSize * 1.7;
+    const mapper = createTextMapper(display, lineHeight);
 
-    function applyScroll() {
-      const scrollable = Math.max(0, display.offsetHeight - window.innerHeight);
-      display.style.top = -(currentFraction * scrollable) + 'px';
+    // pos = shared script position (chars); y = where that is within #display (px).
+    // The text is placed so y sits on the reading line.
+    let pos = 0;
+    let y = 0;
+
+    function readingY() { return window.innerHeight * READING_LINE; }
+
+    function render() {
+      display.style.top = (readingY() - y) + 'px';
+      // Rule just under the current line, like ruled paper (doesn't strike through text).
+      readingLine.style.top = (readingY() + lineHeight() / 2) + 'px';
     }
 
-    function reportMetrics() {
-      const scrollable = Math.max(0, display.offsetHeight - window.innerHeight);
-      socket.emit('view_metrics', { scrollableHeight: scrollable });
+    function goToPos(p) {
+      pos = p;
+      y = mapper.posToY(pos);
+      glideTarget = null;
+      render();
     }
 
-    // Viewport changes (fullscreen, rotation, browser chrome) alter the scrollable height.
-    window.addEventListener('resize', () => {
-      applyScroll();
-      reportMetrics();
+    // Glide: voice-follow positions arrive in small steps; ease towards each
+    // one (~0.3 s time constant) rather than jumping, so the text moves smoothly.
+    let glideTarget = null;
+    let glideLast = null;
+
+    function glideTo(p) {
+      pos = p;
+      const starting = glideTarget === null;
+      glideTarget = mapper.posToY(p);
+      if (starting) { glideLast = null; requestAnimationFrame(glideFrame); }
+    }
+
+    function glideFrame(t) {
+      if (glideTarget === null) return;
+      const dt = glideLast === null ? 16 : Math.min(t - glideLast, 100);
+      glideLast = t;
+      y += (glideTarget - y) * (1 - Math.exp(-dt / 300));
+      if (Math.abs(glideTarget - y) < 0.5) {
+        y = glideTarget;
+        glideTarget = null;
+      }
+      render();
+      if (glideTarget !== null) requestAnimationFrame(glideFrame);
+    }
+
+    function reportPos() {
+      pos = mapper.yToPos(y);
+      socket.emit('position', { pos });
+    }
+
+    // Auto-scroll runs here on the phone (smooth, no network jitter); the desktop
+    // sends play/pause/skip/speed and follows the ~10 Hz position reports.
+    let playing = false;
+    let speed = 30;  // px/s
+    let lastFrame = null;
+    let lastReport = 0;
+
+    function endY() { return mapper.posToY(mapper.length()); }
+
+    function frame(t) {
+      if (!playing) { lastFrame = null; return; }
+      if (lastFrame !== null) {
+        const dt = Math.min(t - lastFrame, 100) / 1000;  // cap to avoid jumps after a stall
+        const yEnd = endY();
+        y = Math.min(yEnd, y + speed * dt);
+        render();
+        if (y >= yEnd) {  // reached the end of the script
+          playing = false;
+          reportPos();
+          socket.emit('play_state', { playing: false });
+          return;
+        }
+        if (t - lastReport >= 100) {
+          reportPos();
+          lastReport = t;
+        }
+      }
+      lastFrame = t;
+      requestAnimationFrame(frame);
+    }
+
+    socket.on('play_control', (d) => {
+      speed = d.speed ?? speed;
+      switch (d.action) {
+        case 'play':
+          if (!playing) { playing = true; requestAnimationFrame(frame); }
+          break;
+        case 'pause':
+          if (playing) { playing = false; reportPos(); }
+          break;
+        case 'skip':
+          y = Math.max(0, Math.min(endY(), y + speed * d.seconds));
+          render();
+          reportPos();
+          break;
+      }
     });
+
+    // Jump (and keep playing, if playing) — or glide, for voice-follow.
+    socket.on('position', ({ pos: p, glide }) => glide ? glideTo(p) : goToPos(p));
 
     socket.on('text_broadcast', ({ text }) => {
       display.textContent = text;
-      applyScroll();
-      requestAnimationFrame(reportMetrics);
-    });
-
-    socket.on('scroll_update', ({ fraction }) => {
-      currentFraction = fraction;
-      applyScroll();
+      goToPos(Math.min(pos, text.length));
     });
 
     socket.on('settings_broadcast', ({ fontSize, marginPct, flipped, brightness }) => {
@@ -103,35 +196,11 @@
       display.style.padding = `20px ${marginPct}%`;
       display.style.transform = flipped ? 'scaleX(-1)' : 'none';
       display.style.color = `rgba(255, 255, 255, ${brightness / 100})`;
-      applyScroll();
-      requestAnimationFrame(reportMetrics);
+      goToPos(pos);  // re-wrapped, so recompute where pos is
     });
 
-    socket.on('seek_to_char', ({ charOffset }) => {
-      const textNode = display.firstChild;
-      if (!textNode || !textNode.nodeValue) return;
-
-      // A collapsed range returns an all-zero DOMRect in Chrome — select one
-      // character instead so getBoundingClientRect() gives a real position.
-      const len = textNode.nodeValue.length;
-      if (len === 0) return;
-      const start = Math.min(charOffset, len - 1);
-      const range = document.createRange();
-      range.setStart(textNode, start);
-      range.setEnd(textNode, start + 1);
-
-      // Character's Y position relative to the top of the display element —
-      // getBoundingClientRect gives viewport coords, but the delta cancels the
-      // current scroll offset, leaving the natural (scroll-independent) Y.
-      const charY = range.getBoundingClientRect().top - display.getBoundingClientRect().top;
-
-      const lineHeight = currentFontSize * 1.7;
-      const targetPx = Math.max(0, charY - 2 * lineHeight); // place clicked line at row 3
-      const scrollable = Math.max(0, display.offsetHeight - window.innerHeight);
-      currentFraction = scrollable > 0 ? Math.min(1, targetPx / scrollable) : 0;
-      applyScroll();
-      socket.emit('seek_ack', { fraction: currentFraction });
-    });
+    // Viewport changes (fullscreen, rotation, browser chrome) move the reading line.
+    window.addEventListener('resize', () => goToPos(pos));
 
     // Wake lock — keeps screen on during use.
     // The API releases the lock whenever the page is hidden, so we re-request

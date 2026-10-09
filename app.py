@@ -4,6 +4,9 @@
 #   "flask-socketio>=5.3",
 #   "qrcode>=7.4",
 #   "Pillow>=10.0",
+#   "vosk>=0.3.45",
+#   "metaphone>=0.6",
+#   "pasimple>=0.0.3",
 # ]
 # ///
 
@@ -16,6 +19,8 @@ import socket as _socket
 import qrcode
 from flask import Flask, render_template
 from flask_socketio import SocketIO, emit
+
+from voice import VoiceFollower, DEFAULT_MODEL
 
 PORT = 5858
 
@@ -47,7 +52,10 @@ LOCAL_IP = get_local_ip()
 MOBILE_URL = f"http://{LOCAL_IP}:{PORT}/view"
 QR_DATA_URI = make_qr_datauri(MOBILE_URL)
 
-state = {"text": "", "fontSize": 36, "marginPct": 15, "scrollFraction": 0, "flipped": True, "brightness": 25, "scrollableHeight": 0}
+# pos = position in the script as a (fractional) character offset — the text on the
+# reading line of every device. playing/speed = auto-scroll state (run on the phone).
+state = {"text": "", "fontSize": 36, "marginPct": 15, "flipped": True, "brightness": 25,
+         "pos": 0.0, "playing": False, "speed": 30, "voice": {"state": "off"}}
 
 # Script file given on the command line (None = no file; Save is disabled).
 script_path = None
@@ -103,14 +111,57 @@ def handle_connect():
         "flipped": state["flipped"],
         "brightness": state["brightness"],
     })
-    emit("scroll_update", {"fraction": state["scrollFraction"]})
-    emit("view_metrics", {"scrollableHeight": state["scrollableHeight"]})
+    emit("play_control", {"action": "play" if state["playing"] else "pause", "speed": state["speed"]})
+    emit("voice_status", state["voice"])
+    # Last connect-time push; "initial" lets the desktop tell it apart from live moves.
+    emit("position", {"pos": state["pos"], "initial": True})
 
 
-@socketio.on("scroll_sync")
-def handle_scroll(data):
-    state["scrollFraction"] = data.get("fraction", 0)
-    emit("scroll_update", data, broadcast=True, include_self=False)
+@socketio.on("position")
+def handle_position(data):
+    state["pos"] = data.get("pos", 0.0)
+    if voice:
+        voice.reset()  # moved by hand (or by auto-scroll): forget the words heard so far
+    emit("position", data, broadcast=True, include_self=False)
+
+
+# ---- Voice-follow (voice.py) ----
+voice = None  # VoiceFollower, created in __main__ (needs the --mic / --vosk-model options)
+
+
+def voice_position(pos):
+    # Speech matched the script: everyone moves there (the phone glides rather than jumps).
+    state["pos"] = pos
+    socketio.emit("position", {"pos": pos, "glide": True})
+
+
+def voice_status(status):
+    state["voice"] = status
+    socketio.emit("voice_status", status)
+
+
+@socketio.on("voice_toggle")
+def handle_voice_toggle(data):
+    if data.get("on"):
+        voice.start()
+    else:
+        voice.stop()
+
+
+@socketio.on("play_control")
+def handle_play_control(data):
+    # action: play | pause | skip (with seconds) | speed — all carry the current speed.
+    state["speed"] = data.get("speed", state["speed"])
+    if data.get("action") in ("play", "pause"):
+        state["playing"] = data["action"] == "play"
+    emit("play_control", data, broadcast=True, include_self=False)
+
+
+@socketio.on("play_state")
+def handle_play_state(data):
+    # Phone reports it stopped by itself (reached the end of the script).
+    state["playing"] = data.get("playing", False)
+    emit("play_state", data, broadcast=True, include_self=False)
 
 
 @socketio.on("text_update")
@@ -150,23 +201,6 @@ def handle_reload():
     emit("reload_result", {"ok": True, **file_info()})
 
 
-@socketio.on("view_metrics")
-def handle_view_metrics(data):
-    state["scrollableHeight"] = data.get("scrollableHeight", 0)
-    emit("view_metrics", data, broadcast=True, include_self=False)
-
-
-@socketio.on("seek_to_char")
-def handle_seek(data):
-    emit("seek_to_char", data, broadcast=True, include_self=False)
-
-
-@socketio.on("seek_ack")
-def handle_seek_ack(data):
-    state["scrollFraction"] = data.get("fraction", state["scrollFraction"])
-    emit("seek_ack", data, broadcast=True, include_self=False)
-
-
 @socketio.on("settings_update")
 def handle_settings(data):
     state["fontSize"] = data.get("fontSize", state["fontSize"])
@@ -179,7 +213,16 @@ def handle_settings(data):
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="LocalCue local-network teleprompter")
     parser.add_argument("script", nargs="?", help="text file to load (and Save back to); created on first Save if missing")
+    parser.add_argument("--mic", metavar="SOURCE",
+                        help="PulseAudio/PipeWire source for voice-follow (default: the default source; "
+                             "list with `pactl list short sources`)")
+    parser.add_argument("--vosk-model", default=DEFAULT_MODEL, metavar="NAME_OR_DIR",
+                        help=f"Vosk model name (downloaded to ~/.cache/vosk on first use) or directory "
+                             f"(default: {DEFAULT_MODEL})")
     args = parser.parse_args()
+    voice = VoiceFollower(get_text=lambda: state["text"], get_pos=lambda: state["pos"],
+                          on_position=voice_position, on_status=voice_status,
+                          model=args.vosk_model, device=args.mic)
     if args.script:
         load_script(args.script)
         print(f"Script:  {script_path}" + ("" if os.path.exists(script_path) else "  (new file, created on Save)"))
