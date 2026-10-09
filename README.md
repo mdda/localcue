@@ -20,8 +20,11 @@ All Python dependencies are declared inline in `app.py` and installed automatica
 ```bash
 git clone git@github.com:mdda/localcue.git
 cd localcue
-uv run app.py
+uv run app.py              # start with an empty script, or…
+uv run app.py script.txt   # load script.txt, and enable Save (Ctrl+S) back to it
 ```
+
+If the script file doesn't exist yet, it is created the first time you save. Without a file argument, the script lives only in the browser/server memory (it survives a desktop page reload, but not a server restart).
 
 The terminal prints two URLs:
 
@@ -62,6 +65,8 @@ The mobile view (`/view`) is designed to run fullscreen so the browser address b
 | Control | Description |
 |---|---|
 | **QR Code** | Shows a scannable QR code and URL for the mobile view — close with **Esc**, click outside, or the Close button |
+| **💾 Save** (Ctrl+S) | Writes the script back to the file given on the command line (only shown when a file was given). The filename beside it shows **●** when there are unsaved edits |
+| **⟳ Reload** | Re-reads the script file from disk — use after editing it in another editor (asks first if you have unsaved edits) |
 | **Font size** slider | Sets text size on the mobile display (16–96 px) |
 | **\| side margins \|** slider | Sets horizontal padding on the mobile display (0–40%) |
 | **↔ Flip** | Toggles left-right mirror on mobile (highlighted = mirrored, for use with a teleprompter mirror) |

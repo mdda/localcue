@@ -8,7 +8,9 @@
 # ///
 
 import io
+import os
 import base64
+import argparse
 import socket as _socket
 
 import qrcode
@@ -47,6 +49,39 @@ QR_DATA_URI = make_qr_datauri(MOBILE_URL)
 
 state = {"text": "", "fontSize": 36, "marginPct": 15, "scrollFraction": 0, "flipped": True, "brightness": 25, "scrollableHeight": 0}
 
+# Script file given on the command line (None = no file; Save is disabled).
+script_path = None
+saved_text = ""  # text as last loaded from / saved to script_path, for the unsaved-changes marker
+
+
+def load_script(path):
+    global script_path
+    script_path = os.path.abspath(path)
+    if os.path.exists(script_path):
+        read_script()
+    # else: start empty; the file is created on first Save
+
+
+def read_script():
+    global saved_text
+    with open(script_path, encoding="utf-8") as f:
+        saved_text = f.read()
+    state["text"] = saved_text
+
+
+def save_script(text):
+    global saved_text
+    # Write to a temp file then rename, so a failed write can't truncate the script.
+    tmp = script_path + ".localcue-tmp"
+    with open(tmp, "w", encoding="utf-8") as f:
+        f.write(text)
+    os.replace(tmp, script_path)
+    saved_text = text
+
+
+def file_info():
+    return {"name": os.path.basename(script_path) if script_path else None, "savedText": saved_text}
+
 
 @app.route("/")
 def desktop():
@@ -60,6 +95,7 @@ def mobile():
 
 @socketio.on("connect")
 def handle_connect():
+    emit("file_info", file_info())
     emit("text_broadcast", {"text": state["text"]})
     emit("settings_broadcast", {
         "fontSize": state["fontSize"],
@@ -81,6 +117,37 @@ def handle_scroll(data):
 def handle_text(data):
     state["text"] = data.get("text", "")
     emit("text_broadcast", data, broadcast=True, include_self=False)
+
+
+@socketio.on("save_script")
+def handle_save(data):
+    if not script_path:
+        emit("save_result", {"ok": False, "error": "no file given on the command line"})
+        return
+    text = data.get("text", "")
+    try:
+        save_script(text)
+    except OSError as e:
+        emit("save_result", {"ok": False, "error": str(e)})
+        return
+    # Save carries the latest text, so make sure server state and the phone match it.
+    state["text"] = text
+    emit("text_broadcast", {"text": text}, broadcast=True, include_self=False)
+    emit("save_result", {"ok": True, **file_info()})
+
+
+@socketio.on("reload_script")
+def handle_reload():
+    if not script_path:
+        emit("reload_result", {"ok": False, "error": "no file given on the command line"})
+        return
+    try:
+        read_script()
+    except OSError as e:
+        emit("reload_result", {"ok": False, "error": e.strerror or str(e)})
+        return
+    emit("text_broadcast", {"text": state["text"]}, broadcast=True, include_self=False)
+    emit("reload_result", {"ok": True, **file_info()})
 
 
 @socketio.on("view_metrics")
@@ -110,6 +177,13 @@ def handle_settings(data):
 
 
 if __name__ == "__main__":
+    parser = argparse.ArgumentParser(description="LocalCue local-network teleprompter")
+    parser.add_argument("script", nargs="?", help="text file to load (and Save back to); created on first Save if missing")
+    args = parser.parse_args()
+    if args.script:
+        load_script(args.script)
+        print(f"Script:  {script_path}" + ("" if os.path.exists(script_path) else "  (new file, created on Save)"))
+
     print(f"Desktop: http://localhost:{PORT}/")
     print(f"Mobile:  {MOBILE_URL}")
     socketio.run(app, host="0.0.0.0", port=PORT, debug=False, allow_unsafe_werkzeug=True)

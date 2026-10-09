@@ -38,6 +38,19 @@
       white-space: nowrap;
     }
     #controls button:hover { background: #3a3a6e; }
+    #controls button[hidden] { display: none; }
+
+    #file-status {
+      font-size: 11px;
+      color: #888;
+      white-space: nowrap;
+      max-width: 160px;
+      flex-shrink: 0;   /* otherwise the crowded control bar squeezes it to nothing */
+      overflow: hidden;
+      text-overflow: ellipsis;
+    }
+    #file-status.dirty { color: #fa4; }
+    #file-status.error { color: #f66; }
     #controls button.active { background: #4a4a9e; border-color: #8888ff; }
 
     .ctrl-sep {
@@ -156,13 +169,17 @@
 
   <div id="controls">
     <button id="qr-btn">&#x1F4F1; QR Code</button>
+    <!-- Save: only shown when a script file was given on the command line -->
+    <button id="save-btn" title="Save script back to disk (Ctrl+S)" hidden>&#x1F4BE; Save</button>
+    <button id="reload-btn" title="Reload script from disk (discards unsaved edits)" hidden>&#x27F3; Reload</button>
+    <span id="file-status"></span>
 
     <div class="ctrl-sep"></div>
     <span class="section-label">Mobile text controls:</span>
 
     <!-- Font size slider -->
     <div class="slider-group">
-      <label>Font size</label>
+      <label for="font-slider">Font size</label>
       <div class="slider-row">
         <input type="range" id="font-slider" min="16" max="96" step="4" value="36">
         <span class="slider-val" id="font-display">36px</span>
@@ -171,7 +188,7 @@
 
     <!-- Side margin slider: icon shows text block between two vertical bars -->
     <div class="slider-group">
-      <label>| side margins |</label>
+      <label for="margin-slider">| side margins |</label>
       <div class="slider-row">
         <input type="range" id="margin-slider" min="0" max="40" step="1" value="15">
         <span class="slider-val" id="margin-display">15%</span>
@@ -183,7 +200,7 @@
 
     <!-- Brightness slider -->
     <div class="slider-group">
-      <label>&#9728;&#xFE0E; Brightness</label>
+      <label for="bright-slider">&#9728;&#xFE0E; Brightness</label>
       <div class="slider-row">
         <input type="range" id="bright-slider" min="0" max="100" step="1" value="25">
         <span class="slider-val" id="bright-display">25%</span>
@@ -197,7 +214,7 @@
 
     <!-- Speed slider (visible in play mode, but always present) -->
     <div class="slider-group">
-      <label>&#8644; Speed (&#8592;&#8594;)</label>
+      <label for="speed-slider">&#8644; Speed (&#8592;&#8594;)</label>
       <div class="slider-row">
         <input type="range" id="speed-slider" min="1" max="100" step="1" value="30">
         <span class="slider-val" id="speed-display">30</span>
@@ -307,6 +324,10 @@
       playMode = !playMode;
       playModeBtn.textContent = playMode ? '⏹ Stop' : '▶ Play';
       playModeBtn.classList.toggle('active', playMode);
+      // Read-only in play mode so arrow keys drive the prompter rather than the
+      // caret; clicking a line still seeks (selectionStart works when read-only).
+      scriptEl.readOnly = playMode;
+      playModeBtn.blur();
       if (playMode) {
         setPlaying(false);
         lastFrameTime = null;
@@ -335,10 +356,80 @@
 
     // Text sync (debounced)
     scriptEl.addEventListener('input', () => {
+      updateFileStatus();
       clearTimeout(debounceTimer);
       debounceTimer = setTimeout(() => {
         socket.emit('text_update', { text: scriptEl.value });
       }, 300);
+    });
+
+    // Save to the script file given on the server's command line (if any).
+    // savedText is the file's content as last loaded/saved, for the unsaved-changes marker.
+    const saveBtn    = document.getElementById('save-btn');
+    const fileStatus = document.getElementById('file-status');
+    let fileName  = null;
+    let savedText = '';
+
+    function updateFileStatus() {
+      if (!fileName) return;
+      const dirty = scriptEl.value !== savedText;
+      fileStatus.textContent = (dirty ? '● ' : '') + fileName;
+      fileStatus.title       = dirty ? 'Unsaved changes (Ctrl+S to save)' : 'Saved';
+      fileStatus.className   = dirty ? 'dirty' : '';
+    }
+
+    function saveScript() {
+      if (!fileName) return;
+      clearTimeout(debounceTimer);  // the save carries the latest text itself
+      socket.emit('save_script', { text: scriptEl.value });
+      fileStatus.textContent = 'saving…';
+    }
+
+    socket.on('file_info', ({ name, savedText: s }) => {
+      fileName  = name;
+      savedText = s;
+      saveBtn.hidden   = !name;
+      reloadBtn.hidden = !name;
+      updateFileStatus();
+    });
+
+    socket.on('save_result', (r) => {
+      if (r.ok) {
+        savedText = r.savedText;
+        updateFileStatus();
+      } else {
+        fileStatus.textContent = 'save failed: ' + r.error;
+        fileStatus.title       = r.error;
+        fileStatus.className   = 'error';
+      }
+    });
+
+    saveBtn.addEventListener('click', () => {
+      saveScript();
+      saveBtn.blur();  // so Space/Enter later don't re-trigger it
+    });
+
+    // Reload from disk — picks up edits made in another editor.
+    const reloadBtn = document.getElementById('reload-btn');
+    reloadBtn.addEventListener('click', () => {
+      reloadBtn.blur();
+      if (scriptEl.value !== savedText &&
+          !confirm('Discard your unsaved edits and reload ' + fileName + ' from disk?')) return;
+      clearTimeout(debounceTimer);  // don't let a pending text_update overwrite the reload
+      socket.emit('reload_script');
+      fileStatus.textContent = 'reloading…';
+    });
+
+    socket.on('reload_result', (r) => {
+      if (r.ok) {
+        scriptEl.value = r.savedText;
+        savedText      = r.savedText;
+        updateFileStatus();
+      } else {
+        fileStatus.textContent = 'reload failed: ' + r.error;
+        fileStatus.title       = r.error;
+        fileStatus.className   = 'error';
+      }
     });
 
     // Scroll sync via wheel events.
@@ -397,6 +488,40 @@
       socket.emit('settings_update', { fontSize, marginPct, flipped, brightness });
     }
 
+    // State restore. The server pushes full state on every connect:
+    //   first connect of this page (e.g. after a reload) → adopt the server's state;
+    //   later reconnects (e.g. server restarted, so its state is blank) → push ours back.
+    let restored = false;
+
+    socket.on('connect', () => {
+      if (!restored) return;
+      socket.emit('text_update', { text: scriptEl.value });
+      emitSettings();
+      syncScroll();
+    });
+
+    socket.on('text_broadcast', ({ text }) => {
+      if (restored) return;
+      scriptEl.value = text;
+      updateFileStatus();
+    });
+
+    socket.on('settings_broadcast', (s) => {
+      if (restored) return;
+      fontSize   = s.fontSize;   fontSlider.value   = fontSize;   fontDisplay.textContent   = fontSize + 'px';
+      marginPct  = s.marginPct;  marginSlider.value = marginPct;  marginDisplay.textContent = marginPct + '%';
+      brightness = s.brightness; brightSlider.value = brightness; brightDisplay.textContent = brightness + '%';
+      flipped    = s.flipped;    flipBtn.classList.toggle('active', flipped);
+    });
+
+    // scroll_update is the last of the connect-time pushes, so it marks the restore as done.
+    socket.on('scroll_update', ({ fraction }) => {
+      if (restored) return;
+      mobileFraction = fraction;
+      updateScrollDisplay();
+      restored = true;
+    });
+
     // QR popup
     document.getElementById('qr-btn').addEventListener('click', () => {
       overlay.removeAttribute('hidden');
@@ -410,8 +535,16 @@
     document.addEventListener('keydown', (e) => {
       if (e.key === 'Escape') overlay.setAttribute('hidden', '');
 
-      // Arrow keys only active in play mode, and not when editing the script textarea.
-      if (!playMode || document.activeElement === scriptEl) return;
+      // Ctrl+S / Cmd+S saves to the script file (instead of the browser's "Save page").
+      if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 's' && fileName) {
+        e.preventDefault();
+        saveScript();
+        return;
+      }
+
+      // Arrow keys only active in play mode (textarea is read-only then, so it's safe
+      // to take them even when it has focus — e.g. after click-to-seek).
+      if (!playMode) return;
 
       switch (e.key) {
         case 'ArrowLeft':

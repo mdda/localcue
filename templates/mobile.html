@@ -80,6 +80,12 @@
       socket.emit('view_metrics', { scrollableHeight: scrollable });
     }
 
+    // Viewport changes (fullscreen, rotation, browser chrome) alter the scrollable height.
+    window.addEventListener('resize', () => {
+      applyScroll();
+      reportMetrics();
+    });
+
     socket.on('text_broadcast', ({ text }) => {
       display.textContent = text;
       applyScroll();
