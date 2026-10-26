@@ -364,10 +364,13 @@
 
     // Scroll the editor so pos is on its reading line. Remembers the resulting
     // scrollTop so the scroll event this causes isn't mistaken for a user scroll.
+    // (If scrollTop doesn't change there's no scroll event, so nothing to expect —
+    // a stale expectation would swallow the user's next small scroll.)
     let expectedScrollTop = null;
     function scrollEditorTo(p) {
+      const before = scriptEl.scrollTop;
       scriptEl.scrollTop = padTop() + mapper.posToY(p) - readingY();
-      expectedScrollTop = scriptEl.scrollTop;
+      expectedScrollTop = scriptEl.scrollTop !== before ? scriptEl.scrollTop : null;
     }
 
     // Any user scroll of the editor (wheel, scrollbar, keyboard, caret) moves the phone.
@@ -377,18 +380,23 @@
       setPos(posFromEditor(), true);
     });
 
-    window.addEventListener('resize', () => {
+    // Re-layout whenever the editor changes size — not only on window resize: the
+    // control bar wraps onto more or fewer rows as its status texts change length.
+    new ResizeObserver(() => {
       layoutEditor();
       scrollEditorTo(pos);
-    });
+    }).observe(scriptEl);
 
     // Positions from elsewhere: the phone while playing (~10 Hz), voice-follow, or the
     // server's connect-time push (initial) — adopted only on first load (see State restore).
     socket.on('position', ({ pos: p, initial }) => {
-      if (initial && restored) return;
+      if (initial) {
+        const adopting = adopt;
+        adopt = false;
+        if (!adopting) { pushState(); return; }
+      }
       setPos(p, false);
       scrollEditorTo(p);
-      if (initial) restored = true;
     });
 
     // Wheel: scrolls the editor (and so the phone) from anywhere on the page.
@@ -507,7 +515,7 @@
     let savedText = '';
 
     function updateFileStatus() {
-      if (!fileName) return;
+      if (!fileName) { fileStatus.textContent = ''; return; }
       const dirty = scriptEl.value !== savedText;
       fileStatus.textContent = (dirty ? '● ' : '') + fileName;
       fileStatus.title       = dirty ? 'Unsaved changes (Ctrl+S to save)' : 'Saved';
@@ -522,6 +530,9 @@
     }
 
     socket.on('file_info', ({ name, savedText: s }) => {
+      // First of the server's connect-time pushes: decide whether to adopt its state.
+      adopt = firstConnect || (name !== null && (name !== fileName || scriptEl.value === savedText));
+      firstConnect = false;
       fileName  = name;
       savedText = s;
       saveBtn.hidden   = !name;
@@ -560,7 +571,11 @@
       if (r.ok) {
         scriptEl.value = r.savedText;
         savedText      = r.savedText;
+        setMirrorText();
         updateFileStatus();
+        // The phone has the new text already (the server sends it first); re-sync position.
+        setPos(Math.min(pos, scriptEl.value.length), true);
+        scrollEditorTo(pos);
       } else {
         fileStatus.textContent = 'reload failed: ' + r.error;
         fileStatus.title       = r.error;
@@ -598,29 +613,34 @@
       socket.emit('settings_update', { fontSize, marginPct, flipped, brightness });
     }
 
-    // State restore. The server pushes full state on every connect, ending with an
-    // `initial` position:
+    // State restore. The server pushes full state on every connect, starting with
+    // file_info and ending with an `initial` position. file_info sets `adopt`:
     //   first connect of this page (e.g. after a reload) → adopt the server's state;
-    //   reconnects (e.g. server restarted, so its state is blank) → ignore it, push ours back.
+    //   reconnect (server restarted) with a file loaded that is a different file, or that
+    //     we have no unsaved edits to → adopt it too (the server's copy is the current one);
+    //   otherwise (no file, so the server's state is blank; or unsaved edits to the same
+    //     file) → ignore it and push ours back when the `initial` position arrives.
+    // Later text/settings broadcasts (another desktop saving, say) are ignored.
     // (Don't use the socket's 'connect' event for this: the server's pushes can arrive
-    // before it fires. The manager's 'reconnect' event only fires on real reconnects.)
-    let restored = false;
+    // before it fires.)
+    let firstConnect = true;
+    let adopt = false;
 
-    socket.io.on('reconnect', () => {
+    function pushState() {
       socket.emit('text_update', { text: scriptEl.value });
       emitSettings();
       setPos(pos, true);
-    });
+    }
 
     socket.on('text_broadcast', ({ text }) => {
-      if (restored) return;
+      if (!adopt) return;
       scriptEl.value = text;
       setMirrorText();
       updateFileStatus();
     });
 
     socket.on('settings_broadcast', (s) => {
-      if (restored) return;
+      if (!adopt) return;
       fontSize   = s.fontSize;   fontSlider.value   = fontSize;   fontDisplay.textContent   = fontSize + 'px';
       marginPct  = s.marginPct;  marginSlider.value = marginPct;  marginDisplay.textContent = marginPct + '%';
       brightness = s.brightness; brightSlider.value = brightness; brightDisplay.textContent = brightness + '%';
